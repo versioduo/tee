@@ -1,0 +1,6 @@
+{
+  "cpu": {
+    "fqbn": "versioduo:samd:tee",
+    "name": "V2 tee"
+  }
+}
