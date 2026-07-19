@@ -18,6 +18,8 @@ namespace {
 
   class Device : public V2Device {
   public:
+    uint8_t passthrough{};
+
     Device() : V2Device() {
       metadata.vendor      = "Versio Duo";
       metadata.product     = "V2 tee";
@@ -47,7 +49,12 @@ namespace {
     }
 
   private:
+    enum class CC {
+      Node = V2MIDI::CC::Controller9,
+    };
+
     auto handleReset() -> void override {
+      passthrough = 0;
       LED.reset();
     }
 
@@ -61,26 +68,39 @@ namespace {
       return true;
     }
 
-    auto handlePacket(V2MIDI::Packet* midi) -> void override {
-      switch (midi->type()) {
-        case V2MIDI::Packet::Status::NoteOff:
-        case V2MIDI::Packet::Status::NoteOn:
-        case V2MIDI::Packet::Status::Aftertouch:
-        case V2MIDI::Packet::Status::ControlChange:
-        case V2MIDI::Packet::Status::ProgramChange:
-        case V2MIDI::Packet::Status::AftertouchChannel:
-        case V2MIDI::Packet::Status::PitchBend: {
-          auto address{midi->channel()};
-          midi->channel(0);
-          SocketNode.send(V2Link::Packet(address, *midi));
-          light(Setup::LEDs::SocketNode, *midi);
+    auto handleControlChange(uint8_t channel, uint8_t controller, uint8_t value) -> void override {
+      if (channel > 0)
+        return;
+
+      switch (controller) {
+        case uint8_t(CC::Node):
+          if (value < 0 || value > usb.ports.current - 1)
+            break;
+
+          passthrough = value;
           break;
-        }
       }
+    }
+
+    auto exportInput(JsonObject json) -> void override {
+      auto jsonControllers{json["controllers"].to<JsonArray>()};
+      {
+        auto jsonController{jsonControllers.add<JsonObject>()};
+        jsonController["name"]   = "Passthrough";
+        jsonController["number"] = uint8_t(CC::Node);
+        jsonController["max"]    = usb.ports.current - 1;
+        jsonController["value"]  = passthrough;
+      }
+    }
+
+    auto exportSystem(JsonObject json) -> void override {
+      auto node{json["midi"]["passthrough"].to<JsonObject>()};
+      node["controller"] = uint8_t(CC::Node);
+      node["node"]       = passthrough;
     }
   } Device;
 
-  // Dispatch MIDI packets.
+  // Dispatch USB MIDI packets.
   class MIDI {
   public:
     auto loop() {
@@ -88,15 +108,80 @@ namespace {
         return;
 
       if (_midi.port == 0) {
-        Device.dispatch(&Device.usb.midi, &_midi);
-        Device.light(Setup::LEDs::Local, _midi);
+        // Addressed to this device.
+
+        if (Device.passthrough == 0) {
+          // Without passthrough, channel #1 addresses this device, the higher channels are forwarded to the node children.
+          switch (_midi.type()) {
+            case V2MIDI::Packet::Status::NoteOff:
+            case V2MIDI::Packet::Status::NoteOn:
+            case V2MIDI::Packet::Status::Aftertouch:
+            case V2MIDI::Packet::Status::ControlChange:
+            case V2MIDI::Packet::Status::ProgramChange:
+            case V2MIDI::Packet::Status::AftertouchChannel:
+            case V2MIDI::Packet::Status::PitchBend:
+              if (_midi.channel() > 0) {
+                auto address{_midi.channel() - 1};
+                _midi.channel(0);
+                SocketNode.send(V2Link::Packet(address, _midi));
+                Device.light(Setup::LEDs::SocketNode, _midi);
+                break;
+              }
+              [[fallthrough]];
+
+            default:
+              Device.dispatch(&Device.usb.midi, &_midi);
+              Device.light(Setup::LEDs::Local, _midi);
+          }
+
+          return;
+        }
+
+        // With passthrough, all messages are forwarded to the specified node child.
+        SocketNode.send(V2Link::Packet(Device.passthrough - 1, _midi));
+        Device.light(Setup::LEDs::SocketNode, _midi);
+
+        // MIDI Reset messages are intercepted and reset this device too. This ensures
+        // the user interface can always revert back to talking to this device.
+        if (_midi.type() == V2MIDI::Packet::Status::SystemReset)
+          Device.dispatch(&Device.usb.midi, &_midi);
+
+        return;
+      }
+
+      auto address{_midi.port - 1};
+
+      // Addressed to the direct children devices.
+      if (Device.passthrough == 0) {
+        // The channel of the incoming message is patched into the port of the outgoing
+        // message. System messages are addressed to the node itself.
+        //
+        // The receiving device will use the port number to route the packet to its node children.
+
+        switch (_midi.type()) {
+          case V2MIDI::Packet::Status::NoteOff:
+          case V2MIDI::Packet::Status::NoteOn:
+          case V2MIDI::Packet::Status::Aftertouch:
+          case V2MIDI::Packet::Status::ControlChange:
+          case V2MIDI::Packet::Status::ProgramChange:
+          case V2MIDI::Packet::Status::AftertouchChannel:
+          case V2MIDI::Packet::Status::PitchBend:
+            _midi.port = _midi.channel();
+            _midi.channel(0);
+            break;
+
+          default:
+            _midi.port = 0;
+        }
 
       } else {
-        V2Link::Packet p(_midi.port - 1, _midi);
-        p.midi.port = 0;
-        Socket.send(p);
-        Device.light(Setup::LEDs::Socket, p.midi);
+        // All messages are addressed to the specified node child.
+        _midi.port = Device.passthrough;
       }
+
+      V2Link::Packet p(address, _midi);
+      Socket.send(p);
+      Device.light(Setup::LEDs::Socket, p.midi);
     }
 
   private:
@@ -114,8 +199,16 @@ namespace {
     // Receive a host event from our parent device.
     auto receivePlug(V2Link::Packet& p) -> void override {
       if (p.type == V2Link::Packet::Type::MIDI) {
-        Device.dispatch(&Plug, &p.midi);
-        Device.light(Setup::LEDs::Plug, p.midi);
+        if (p.midi.port == 0) {
+          Device.dispatch(&Plug, &p.midi);
+          Device.light(Setup::LEDs::Plug, p.midi);
+          return;
+        }
+
+        auto address{p.midi.port - 1};
+        p.midi.port = 0;
+        SocketNode.send(V2Link::Packet(address, p.midi));
+        Device.light(Setup::LEDs::SocketNode, p.midi);
       }
     }
 
@@ -123,30 +216,51 @@ namespace {
     auto receiveSocket(V2Link::Packet& p) -> void override {
       if (p.type == V2Link::Packet::Type::MIDI) {
         if (Device.usb.midi.connected()) {
-          Device.light(Setup::LEDs::Socket, p.midi);
+          if (p.midi.port > 0) {
+            switch (p.midi.type()) {
+              case V2MIDI::Packet::Status::NoteOff:
+              case V2MIDI::Packet::Status::NoteOn:
+              case V2MIDI::Packet::Status::Aftertouch:
+              case V2MIDI::Packet::Status::ControlChange:
+              case V2MIDI::Packet::Status::ProgramChange:
+              case V2MIDI::Packet::Status::AftertouchChannel:
+              case V2MIDI::Packet::Status::PitchBend:
+                p.midi.channel(p.midi.port);
+                break;
+            }
+          }
+
           p.midi.port = p.address;
           Device.usb.midi.send(p.midi);
+          Device.light(Setup::LEDs::Socket, p.midi);
         }
       }
     }
 
     auto receiveSocketNode(V2Link::Packet& p) -> void override {
-      if (p.type != V2Link::Packet::Type::MIDI)
-        return;
+      if (p.type == V2Link::Packet::Type::MIDI) {
+        p.midi.port = p.address + 1;
+        Plug.send(p.midi);
+        Device.light(Setup::LEDs::Plug, p.midi);
 
-      switch (p.midi.type()) {
-        case V2MIDI::Packet::Status::NoteOff:
-        case V2MIDI::Packet::Status::NoteOn:
-        case V2MIDI::Packet::Status::Aftertouch:
-        case V2MIDI::Packet::Status::ControlChange:
-        case V2MIDI::Packet::Status::ProgramChange:
-        case V2MIDI::Packet::Status::AftertouchChannel:
-        case V2MIDI::Packet::Status::PitchBend:
-          p.midi.channel(p.address);
-          Plug.send(p.midi);
-          Device.usb.midi.send(p.midi);
-          Device.light(Setup::LEDs::Plug, p.midi);
-          break;
+        switch (p.midi.type()) {
+          case V2MIDI::Packet::Status::NoteOff:
+          case V2MIDI::Packet::Status::NoteOn:
+          case V2MIDI::Packet::Status::Aftertouch:
+          case V2MIDI::Packet::Status::ControlChange:
+          case V2MIDI::Packet::Status::ProgramChange:
+          case V2MIDI::Packet::Status::AftertouchChannel:
+          case V2MIDI::Packet::Status::PitchBend:
+            p.midi.channel(p.address + 1);
+            break;
+
+          default:
+            if (p.address + 1 != Device.passthrough)
+              break;
+        }
+
+        p.midi.port = 0;
+        Device.usb.midi.send(p.midi);
       }
     }
   } Link;
