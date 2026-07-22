@@ -3,8 +3,9 @@
 #include <V2LED.h>
 #include <V2Link.h>
 #include <V2MIDI.h>
+#include <V2Music.h>
 
-V2DEVICE_METADATA("com.versioduo.tee", 3, "versioduo:samd:tee");
+V2DEVICE_METADATA("com.versioduo.tee", 4, "versioduo:samd:tee");
 
 namespace {
   V2LED::WS2812 LED(4, PIN_LED_WS2812, &sercom2, SPI_PAD_0_SCK_1, PIO_SERCOM);
@@ -29,6 +30,15 @@ namespace {
       system.download  = "https://versioduo.com/download";
       system.configure = "https://versioduo.com/configure";
 
+      help.device = "• Every daisy-chained tee appears as one MIDI port at the host's USB connection.\n"
+                    "• The node / children port of the tee supplies bus-power 28 V / 75 W to the connected devices.\n"
+                    "• Channel #1 addresses the tee device itself, channel #2 and up address the children "
+                    "devices. The children devices can therefore only use channel #1.\n"
+                    "• The devices receive notes and CCs, but cannot be reached via System Messages. The very first "
+                    "tee – only the one connected over USB – can be put in passthrough mode. The mode stays active "
+                    "until the tee receives a MIDI Reset message. After enabling passthrough, all MIDI ports route the "
+                    "messages to the children devices instead of the tee itself.\n";
+
       usb.ports.standard = 8;
     }
 
@@ -49,11 +59,14 @@ namespace {
     }
 
   private:
+    V2Music::ForcedStop _force;
+
     enum class CC {
       Node = V2MIDI::CC::Controller9,
     };
 
     auto handleReset() -> void override {
+      _force.reset();
       passthrough = 0;
       LED.reset();
     }
@@ -74,10 +87,16 @@ namespace {
 
       switch (controller) {
         case uint8_t(CC::Node):
-          if (value < 0 || value > usb.ports.current - 1)
+          if (value < 0 || value > 15)
             break;
 
           passthrough = value;
+          break;
+
+        case V2MIDI::CC::AllSoundOff:
+        case V2MIDI::CC::AllNotesOff:
+          if (_force.trigger())
+            reset();
           break;
       }
     }
@@ -85,18 +104,18 @@ namespace {
     auto exportInput(JsonObject json) -> void override {
       auto jsonControllers{json["controllers"].to<JsonArray>()};
       {
-        auto jsonController{jsonControllers.add<JsonObject>()};
-        jsonController["name"]   = "Passthrough";
-        jsonController["number"] = uint8_t(CC::Node);
-        jsonController["max"]    = usb.ports.current - 1;
-        jsonController["value"]  = passthrough;
+        auto j{jsonControllers.add<JsonObject>()};
+        j["name"]   = "Passthrough";
+        j["number"] = uint8_t(CC::Node);
+        j["max"]    = 15;
+        j["value"]  = passthrough;
       }
     }
 
     auto exportSystem(JsonObject json) -> void override {
-      auto node{json["midi"]["passthrough"].to<JsonObject>()};
-      node["controller"] = uint8_t(CC::Node);
-      node["node"]       = passthrough;
+      auto j{json["midi"]["passthrough"].to<JsonObject>()};
+      j["controller"] = uint8_t(CC::Node);
+      j["node"]       = passthrough;
     }
   } Device;
 
@@ -141,10 +160,24 @@ namespace {
         SocketNode.send(V2Link::Packet(Device.passthrough - 1, _midi));
         Device.light(Setup::LEDs::SocketNode, _midi);
 
-        // MIDI Reset messages are intercepted and reset this device too. This ensures
-        // the user interface can always revert back to talking to this device.
-        if (_midi.type() == V2MIDI::Packet::Status::SystemReset)
-          Device.dispatch(&Device.usb.midi, &_midi);
+        // MIDI Reset and bursts of "AllNotesOff" messages are intercepted and
+        // reset this device. This ensures the user interface can always revert
+        // back to talking to this device.
+        switch (_midi.type()) {
+          case V2MIDI::Packet::Status::ControlChange:
+            switch (_midi.getController()) {
+              case V2MIDI::CC::AllSoundOff:
+              case V2MIDI::CC::AllNotesOff:
+                _midi.channel(0);
+                Device.dispatch(&Device.usb.midi, &_midi);
+                break;
+            }
+            break;
+
+          case V2MIDI::Packet::Status::SystemReset:
+            Device.dispatch(&Device.usb.midi, &_midi);
+            break;
+        }
 
         return;
       }
@@ -157,7 +190,6 @@ namespace {
         // message. System messages are addressed to the node itself.
         //
         // The receiving device will use the port number to route the packet to its node children.
-
         switch (_midi.type()) {
           case V2MIDI::Packet::Status::NoteOff:
           case V2MIDI::Packet::Status::NoteOn:
@@ -205,6 +237,7 @@ namespace {
           return;
         }
 
+        // The MIDI port was patched-in by our parent device to route the message to a node child.
         auto address{p.midi.port - 1};
         p.midi.port = 0;
         SocketNode.send(V2Link::Packet(address, p.midi));
@@ -217,6 +250,7 @@ namespace {
       if (p.type == V2Link::Packet::Type::MIDI) {
         if (Device.usb.midi.connected()) {
           if (p.midi.port > 0) {
+            // Patch the MIDI port back to the channel.
             switch (p.midi.type()) {
               case V2MIDI::Packet::Status::NoteOff:
               case V2MIDI::Packet::Status::NoteOn:
@@ -230,6 +264,7 @@ namespace {
             }
           }
 
+          // Send the message to the MIDI port matching the remote address.
           p.midi.port = p.address;
           Device.usb.midi.send(p.midi);
           Device.light(Setup::LEDs::Socket, p.midi);
@@ -237,12 +272,15 @@ namespace {
       }
     }
 
+    // Receive messages from our node children.
     auto receiveSocketNode(V2Link::Packet& p) -> void override {
       if (p.type == V2Link::Packet::Type::MIDI) {
+        // Set the MIDI port to the child node address and send the packet towards the host.
         p.midi.port = p.address + 1;
         Plug.send(p.midi);
         Device.light(Setup::LEDs::Plug, p.midi);
 
+        // Patch-in the MIDI channel with the child node address.
         switch (p.midi.type()) {
           case V2MIDI::Packet::Status::NoteOff:
           case V2MIDI::Packet::Status::NoteOn:
@@ -253,10 +291,6 @@ namespace {
           case V2MIDI::Packet::Status::PitchBend:
             p.midi.channel(p.address + 1);
             break;
-
-          default:
-            if (p.address + 1 != Device.passthrough)
-              break;
         }
 
         p.midi.port = 0;
