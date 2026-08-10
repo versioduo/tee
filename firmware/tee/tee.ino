@@ -5,13 +5,13 @@
 #include <V2MIDI.h>
 #include <V2Music.h>
 
-V2DEVICE_METADATA("com.versioduo.tee", 4, "versioduo:samd:tee");
+V2DEVICE_METADATA("com.versioduo.tee", 6, "versioduo:samd:tee");
 
 namespace {
-  V2LED::WS2812 LED(4, PIN_LED_WS2812, &sercom2, SPI_PAD_0_SCK_1, PIO_SERCOM);
-  V2Link::Port  Plug(&SerialPlug, PIN_SERIAL_PLUG_TX_ENABLE);
-  V2Link::Port  Socket(&SerialSocket, PIN_SERIAL_SOCKET_TX_ENABLE);
-  V2Link::Port  SocketNode(&SerialSocketNode, PIN_SERIAL_SOCKET_NODE_TX_ENABLE);
+  V2LED::WS2812<4> LED(PIN_LED_WS2812, sercom2, SPI_PAD_0_SCK_1, PIO_SERCOM);
+  V2Link::Port     Plug(&SerialPlug, PIN_SERIAL_PLUG_TX_ENABLE);
+  V2Link::Port     Socket(&SerialSocket, PIN_SERIAL_SOCKET_TX_ENABLE);
+  V2Link::Port     SocketNode(&SerialSocketNode, PIN_SERIAL_SOCKET_NODE_TX_ENABLE);
 
   struct Setup {
     enum LEDs : uint8_t { Local, Plug, SocketNode, Socket };
@@ -45,15 +45,15 @@ namespace {
     auto light(Setup::LEDs led, const V2MIDI::Packet& midi) {
       switch (midi.type()) {
         case V2MIDI::Packet::Status::NoteOff:
-          LED.setBrightness(led, 0);
+          LED.brightness(0, led);
           break;
 
         case V2MIDI::Packet::Status::NoteOn:
-          LED.setHSV(led, V2Colour::Orange, 0.95, 0.5);
+          LED.hsv({V2Colour::Orange, 0.95, 0.5}, led);
           break;
 
         case V2MIDI::Packet::Status::ControlChange:
-          LED.setHSV(led, V2Colour::Cyan, 0.95, 0.5);
+          LED.hsv({V2Colour::Cyan, 0.95, 0.5}, led);
           break;
       }
     }
@@ -113,7 +113,7 @@ namespace {
     }
 
     auto exportSystem(JsonObject json) -> void override {
-      auto j{json["midi"]["passthrough"].to<JsonObject>()};
+      auto j{json["connection"]["passthrough"].to<JsonObject>()};
       j["controller"] = uint8_t(CC::Node);
       j["node"]       = passthrough;
     }
@@ -303,7 +303,7 @@ namespace {
 auto setup() -> void {
   Serial.begin(9600);
   LED.begin();
-  LED.setMaxBrightness(0.5);
+  LED.brightnessMax(0.5);
 
   // Set the SERCOM interrupt priority, it requires a stable ~300 kHz interrupt
   // frequency. The calls need to be after begin().
