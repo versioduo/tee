@@ -5,13 +5,13 @@
 #include <V2MIDI.h>
 #include <V2Music.h>
 
-V2DEVICE_METADATA("com.versioduo.tee", 6, "versioduo:samd:tee");
+V2DEVICE_METADATA("com.versioduo.tee", 7, "versioduo:samd:tee");
 
 namespace {
   V2LED::WS2812<4> LED(PIN_LED_WS2812, sercom2, SPI_PAD_0_SCK_1, PIO_SERCOM);
-  V2Link::Port     Plug(&SerialPlug, PIN_SERIAL_PLUG_TX_ENABLE);
-  V2Link::Port     Socket(&SerialSocket, PIN_SERIAL_SOCKET_TX_ENABLE);
-  V2Link::Port     SocketNode(&SerialSocketNode, PIN_SERIAL_SOCKET_NODE_TX_ENABLE);
+  V2Link::Port     Plug(&SerialPlug, PIN_SERIAL_PLUG_TX_ENABLE, "plug");
+  V2Link::Port     Socket(&SerialSocket, PIN_SERIAL_SOCKET_TX_ENABLE, "socket");
+  V2Link::Port     SocketNode(&SerialSocketNode, PIN_SERIAL_SOCKET_NODE_TX_ENABLE, "socket-node");
 
   struct Setup {
     enum LEDs : uint8_t { Local, Plug, SocketNode, Socket };
