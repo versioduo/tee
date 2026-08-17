@@ -5,9 +5,8 @@
 #include <V2MIDI.h>
 #include <V2Music.h>
 
-V2DEVICE_METADATA("com.versioduo.tee", 7, "versioduo:samd:tee");
-
 namespace {
+  V2Device::Info   Info{V2DeviceInfo("com.versioduo.tee", 7, "versioduo:samd:tee")};
   V2LED::WS2812<4> LED(PIN_LED_WS2812, sercom2, SPI_PAD_0_SCK_1, PIO_SERCOM);
   V2Link::Port     Plug(&SerialPlug, PIN_SERIAL_PLUG_TX_ENABLE, "plug");
   V2Link::Port     Socket(&SerialSocket, PIN_SERIAL_SOCKET_TX_ENABLE, "socket");
@@ -26,20 +25,17 @@ namespace {
       metadata.product     = "V2 tee";
       metadata.description = "V2 Link Node";
       metadata.home        = "https://versioduo.com/#tee";
-
-      system.download  = "https://versioduo.com/download";
-      system.configure = "https://versioduo.com/configure";
-
-      help.device = "• Every daisy-chained tee appears as one MIDI port at the host's USB connection.\n"
-                    "• The node / children port of the tee supplies bus-power 28 V / 75 W to the connected devices.\n"
-                    "• Channel #1 addresses the tee device itself, channel #2 and up address the children "
-                    "devices. The children devices can therefore only use channel #1.\n"
-                    "• The devices receive notes and CCs, but cannot be reached via System Messages. The very first "
-                    "tee – only the one connected over USB – can be put in passthrough mode. The mode stays active "
-                    "until the tee receives a MIDI Reset message. After enabling passthrough, all MIDI ports route the "
-                    "messages to the children devices instead of the tee itself.\n";
-
-      usb.ports.standard = 8;
+      system.download      = "https://versioduo.com/download";
+      system.configure     = "https://versioduo.com/configure";
+      help.device          = "• Every daisy-chained tee appears as one MIDI port at the host's USB connection.\n"
+                             "• The node / children port of the tee supplies bus-power 28 V / 75 W to the connected devices.\n"
+                             "• Channel #1 addresses the tee device itself, channel #2 and up address the children "
+                             "devices. The children devices can therefore only use channel #1.\n"
+                             "• The devices receive notes and CCs, but cannot be reached via System Messages. The very first "
+                             "tee – only the one connected over USB – can be put in passthrough mode. The mode stays active "
+                             "until the tee receives a MIDI Reset message. After enabling passthrough, all MIDI ports route the "
+                             "messages to the children devices instead of the tee itself.\n";
+      usb.ports.standard   = 8;
     }
 
     auto light(Setup::LEDs led, const V2MIDI::Packet& midi) {
